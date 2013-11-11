@@ -125,6 +125,25 @@ func (e *encoder) writeIHDR() {
 	e.writeChunk(e.tmp[:13], "IHDR")
 }
 
+func (e *encoder) writeSBIT(n uint) {
+	switch e.cb {
+	case cbG8, cbG16:
+		e.tmp[0] = byte(n)
+		e.writeChunk(e.tmp[:1], "sBIT")
+	case cbTC8, cbTC16, cbP8:
+		e.tmp[0] = byte(n)
+		e.tmp[1] = byte(n)
+		e.tmp[2] = byte(n)
+		e.writeChunk(e.tmp[:3], "sBIT")
+	case cbTCA8, cbTCA16:
+		e.tmp[0] = byte(n)
+		e.tmp[1] = byte(n)
+		e.tmp[2] = byte(n)
+		e.tmp[3] = 8
+		e.writeChunk(e.tmp[:4], "sBIT")
+	}
+}
+
 func (e *encoder) writePLTEAndTRNS(p color.Palette) {
 	if len(p) < 1 || len(p) > 256 {
 		e.err = FormatError("bad palette length: " + strconv.Itoa(len(p)))
@@ -473,6 +492,60 @@ func Encode(w io.Writer, m image.Image) error {
 
 	_, e.err = io.WriteString(w, pngHeader)
 	e.writeIHDR()
+	if pal != nil {
+		e.writePLTEAndTRNS(pal)
+	}
+	e.writeIDATs()
+	e.writeIEND()
+	return e.err
+}
+
+// EncodeWithSBIT writes the Image m to w in PNG format. Any Image may be
+// encoded, but images that are not image.NRGBA might be encoded lossily.
+func EncodeWithSBIT(w io.Writer, m image.Image, sBIT uint) error {
+	// Obviously, negative widths and heights are invalid. Furthermore, the PNG
+	// spec section 11.2.2 says that zero is invalid. Excessively large images are
+	// also rejected.
+	mw, mh := int64(m.Bounds().Dx()), int64(m.Bounds().Dy())
+	if mw <= 0 || mh <= 0 || mw >= 1<<32 || mh >= 1<<32 {
+		return FormatError("invalid image size: " + strconv.FormatInt(mw, 10) + "x" + strconv.FormatInt(mh, 10))
+	}
+
+	var e encoder
+	e.w = w
+	e.m = m
+
+	var pal color.Palette
+	// cbP8 encoding needs PalettedImage's ColorIndexAt method.
+	if _, ok := m.(image.PalettedImage); ok {
+		pal, _ = m.ColorModel().(color.Palette)
+	}
+	if pal != nil {
+		e.cb = cbP8
+	} else {
+		switch m.ColorModel() {
+		case color.GrayModel:
+			e.cb = cbG8
+		case color.Gray16Model:
+			e.cb = cbG16
+		case color.RGBAModel, color.NRGBAModel, color.AlphaModel:
+			if opaque(m) {
+				e.cb = cbTC8
+			} else {
+				e.cb = cbTCA8
+			}
+		default:
+			if opaque(m) {
+				e.cb = cbTC16
+			} else {
+				e.cb = cbTCA16
+			}
+		}
+	}
+
+	_, e.err = io.WriteString(w, pngHeader)
+	e.writeIHDR()
+	e.writeSBIT(sBIT)
 	if pal != nil {
 		e.writePLTEAndTRNS(pal)
 	}
